@@ -1,0 +1,156 @@
+---
+title: "Stats 101C - Kaggle Competition 2"
+author: "Instructions"
+date: "Summer 2022"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(tidyverse)
+library(tidymodels)
+library(lubridate)
+library(glmnet)
+library(xgboost)
+library(kernlab)
+library(LiblineaR)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Data
+```{r}
+data <- read_csv("heart_train.csv")
+head(data)
+```
+
+Cleaning Data
+```{r}
+id_data <- data[, "id"]
+data <- select(data, !"id")
+data[, "num"] <- factor(data$num)
+data[, "ca"] <- as.numeric(unlist(data[, "ca"]))
+data[, "thal"] <- as.numeric(unlist(data[, "thal"]))
+head(data)
+```
+
+Splitting Data
+```{r}
+set.seed(502)
+data_split <- initial_split(data, prop = 0.80, strata = num)
+train <- training(data_split)
+test <- testing(data_split)
+```
+
+Recipes
+```{r}
+norm_recipe <- 
+  recipe(num ~ . , data = train) %>%
+  prep(training = train, retain = TRUE)
+norm_recipe
+```
+
+Models
+```{r}
+boost_model <- boost_tree(mode = "classification", trees = 500, learn_rate = 0.1) %>% 
+  set_engine("xgboost")
+
+boost_model2 <- boost_tree(mode = "classification", trees = 200, learn_rate = 0.1) %>% 
+  set_engine("xgboost")
+
+boost_model3 <- boost_tree(mode = "classification") %>% 
+  set_engine("xgboost")
+
+svm_model <- svm_poly() %>% 
+  set_engine("kernlab") %>% 
+  set_mode("classification")
+
+knn_spec <- nearest_neighbor(
+    mode = "classification", 
+    neighbors = 9
+  ) %>%
+  set_engine("kknn")
+
+model_list = list(boost_model_1 = boost_model, boost_model_2 = boost_model2, boost_model_3 = boost_model3, svm_model = svm_model, knn_spec = knn_spec)
+```
+
+```{r}
+# tuning
+# ames_folds <- vfold_cv(train, v = 10)
+# keep_pred <- control_resamples(save_pred = TRUE, save_workflow = TRUE)
+
+# tuning_grid <- grid_regular(trees(range(100,500)), 
+# learn_rate(range(-1,-0.4)), levels = 15)
+
+# wf <- workflow() %>%
+#   add_model(boost_model2) %>%
+#   add_formula(num ~ . )
+
+# res <- tune_grid(wf, resamples = ames_folds, grid = tuning_grid)
+```
+
+
+```{r}
+ # tuning 2
+# res %>% collect_metrics() %>% filter(.metric == "accuracy") %>% 
+# arrange(desc(mean))
+```
+
+Creating Workflow
+```{r}
+preproc = list(norm = norm_recipe)
+glmnet_models <- workflow_set(preproc = preproc, models = model_list)
+glmnet_models
+```
+
+Fitting resamples
+```{r}
+ames_folds <- vfold_cv(train, v = 10)
+keep_pred <- control_resamples(save_pred = TRUE, save_workflow = TRUE)
+
+glmnet_models <- 
+  glmnet_models %>% 
+  workflow_map("fit_resamples", 
+               seed = 1101, verbose = TRUE,
+               resamples = ames_folds, control = keep_pred)
+```
+
+Importing test data for kaggle
+```{r}
+kaggle_data <- read_csv("heart_test.csv")
+head(kaggle_data)
+```
+
+Cleaning Data
+```{r}
+id_data <- kaggle_data[, "id"]
+kaggle_data <- select(kaggle_data, !"id")
+kaggle_data[, "ca"] <- as.numeric(unlist(kaggle_data[, "ca"]))
+kaggle_data[, "thal"] <- as.numeric(unlist(kaggle_data[, "thal"]))
+
+kaggle_data[9, "ca"] <- 0
+kaggle_data[60, "ca"] <- 0
+
+head(kaggle_data)
+```
+
+Fitting output model
+```{r}
+glmnet_wflow_2 <- 
+  workflow() %>% 
+  add_model(boost_model2) %>% 
+  add_recipe(norm_recipe)
+
+glmnet_fit_2 <- fit(glmnet_wflow_2, train)
+```
+
+Output for kaggle
+```{r}
+kaggle_test_results_2 <- bind_cols(id_data, predict(glmnet_fit_2, new_data = kaggle_data))
+
+names(kaggle_test_results_2) <- c("Id", "Predicted")
+
+write.csv(kaggle_test_results_2,"results_2.csv", row.names = FALSE)
+kaggle_test_results_2
+```

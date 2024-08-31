@@ -1,0 +1,386 @@
+---
+title: "Stats 101C - 2nd_Kaggle Competition"
+author: "Jun_Kim"
+date: "Summer 2022"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(tidyverse)
+library(tidymodels)
+library(lubridate)
+library(glmnet)
+library(xgboost)
+library(ranger)
+# install.packages("ranger")
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Data
+
+```{r}
+data <- read_csv("heart_train.csv")
+head(data)
+nrow(data)
+str(data)
+# ca, thal => chr
+```
+
+
+Cleaning Data
+
+```{r}
+id_data <- data[, "id"]
+data <- select(data, !"id")
+head(data)
+str(data)
+
+
+data$cp <- as.character(data$cp)
+data$slope <- as.character(data$slope)
+data$ca <- as.numeric(data$ca)
+#confirm class of character vector
+class(data$cp)
+# install.packages("caret")
+library(caret)
+dmy <- dummyVars(~., data = data)
+data <- data.frame(predict(dmy, newdata = data))
+data <- data[,-18]
+head(data)
+
+```
+
+
+
+Splitting Data
+```{r}
+set.seed(502)
+data_split <- initial_split(data, prop = 0.80, strata = num)
+vote_train <- training(data_split)
+vote_test <- testing(data_split)
+```
+
+```{r}
+norm_recipe <- 
+  recipe(num ~ ., data = vote_train) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors()) %>%
+  # estimate the means and standard deviations
+  prep(training = vote_train, retain = TRUE)
+norm_recipe
+```
+
+```{r}
+# vote_rec <- 
+#   recipe(num ~ ., data = vote_train) %>%
+#   step_dummy(all_nominal_predictors())
+```
+
+```{r}
+# vote_rec_scaled <-
+#   recipe(num ~ ., data = vote_train) %>%
+#   step_dummy(all_nominal_predictors()) %>%
+#   step_center(all_predictors()) %>%
+#   step_scale(all_predictors()) %>%
+#   # estimate the means and standard deviations
+#   prep(training = vote_train, retain = TRUE)
+```
+
+```{r}
+set.seed(1001)
+vote_folds <- vfold_cv(vote_train, v = 10)
+keep_pred <- control_resamples(save_pred = TRUE, save_workflow = TRUE)
+vote_folds
+```
+
+```{r}
+lm_model <- linear_reg() %>% set_engine("lm")
+boost_model <- boost_tree(mode = "regression", trees = 500, learn_rate = 0.1) %>% 
+  set_engine("xgboost")
+boost_model2 <- boost_tree(mode = "regression", trees = 200, learn_rate = 0.1) %>% 
+  set_engine("xgboost")
+boost_model3 <- boost_tree(mode = "regression", trees = 1000, learn_rate = 0.1) %>% 
+  set_engine("xgboost")
+lasso_model <- linear_reg(penalty = 0.001, mixture = 1) %>% set_engine("glmnet")
+ridge_model <- linear_reg(penalty = 0.001, mixture = 0) %>% set_engine("glmnet")
+glmnet00001_model <- linear_reg(penalty = 0.00001, mixture = 0.5) %>% set_engine("glmnet")
+glmnet0001_model <- linear_reg(penalty = 0.0001, mixture = 0.5) %>% set_engine("glmnet")
+glmnet001_model <- linear_reg(penalty = 0.001, mixture = 0.5) %>% set_engine("glmnet")
+glmnet005_model <- linear_reg(penalty = 0.005, mixture = 0.5) %>% set_engine("glmnet")
+glmnet01_model <- linear_reg(penalty = 0.01, mixture = 0.5) %>% set_engine("glmnet")
+glmnet02_model <- linear_reg(penalty = 0.02, mixture = 0.5) %>% set_engine("glmnet")
+
+model_list = list(
+  lm = lm_model,
+  lasso = lasso_model,
+  ridge = ridge_model, 
+  glm00001 = glmnet00001_model,
+  glm0001 = glmnet0001_model,
+  glm001 = glmnet001_model,
+  glm005 = glmnet005_model,
+  glm01 = glmnet01_model,
+  glm02 = glmnet02_model,
+  boost = boost_model,
+  boost2 = boost_model2,
+  boost3 = boost_model3
+  )
+
+
+preproc = list(norm = norm_recipe)
+```
+
+```{r}
+glmnet_models <- workflow_set(preproc = preproc, models = model_list, cross = TRUE)
+glmnet_models
+```
+
+##
+
+```{r}
+glmnet_models <- 
+  glmnet_models %>% 
+  workflow_map("fit_resamples", 
+               # Options to `workflow_map()`: 
+               seed = 1101, verbose = TRUE,
+               # Options to `fit_resamples()`: 
+               resamples = vote_folds, control = keep_pred)
+```
+##
+```{r}
+collect_metrics(glmnet_models) %>%
+  filter(.metric == "rmse")
+```
+
+```{r}
+autoplot(glmnet_models)
+```
+
+
+```{r}
+rank_results(glmnet_models, rank_metric = "rmse", select_best = TRUE)
+```
+
+
+
+```{r}
+#Best model:
+lm_wflow <- 
+  workflow() %>% 
+  add_model(lm_model) %>% 
+  add_recipe(norm_recipe)
+
+glmnet_fit <- fit(lm_wflow, vote_train)
+
+glmnet_test_results <- 
+  vote_test %>%
+  select(num) %>%
+  bind_cols(predict(glmnet_fit, new_data = vote_test))
+
+head(glmnet_test_results)
+
+# see the relationship between actual value and predicted value.
+vote_test_res <- predict(glmnet_fit, new_data = vote_test %>% select(-num))
+vote_test_res
+vote_test_res <- bind_cols(vote_test_res, vote_test %>% select(num))
+vote_test_res
+
+ggplot(vote_test_res, aes(x = num, y = .pred)) +
+  geom_abline(lty = 2) + # adds a diagonal line
+  geom_point(alpha = 0.5) +
+  labs(y = "Predicted num ", x = "num") +
+  coord_obs_pred()
+
+rmse(glmnet_test_results, truth = num, estimate = .pred)
+
+```
+
+```{r}
+#Second best model:
+glmnet02_wflow <- 
+  workflow() %>% 
+  add_model(glmnet02_model) %>% 
+  add_recipe(norm_recipe)
+
+glmnet_fit2 <- fit(glmnet02_wflow, vote_train)
+
+glmnet_test_results2 <- 
+  vote_test %>%
+  select(num) %>%
+  bind_cols(predict(glmnet_fit2, new_data = vote_test))
+
+head(glmnet_test_results2)
+
+
+# see the relationship between actual value and predicted value.
+vote_test_res2 <- predict(glmnet_fit2, new_data = vote_test %>% select(-num))
+vote_test_res2
+vote_test_res2 <- bind_cols(vote_test_res2, vote_test %>% select(num))
+vote_test_res2
+
+ggplot(vote_test_res2, aes(x = num, y = .pred)) +
+  geom_abline(lty = 2) + # adds a diagonal line
+  geom_point(alpha = 0.5) +
+  labs(y = "Predicted num ", x = "num") +
+  coord_obs_pred()
+
+rmse(glmnet_test_results2, truth = num, estimate = .pred)
+```
+
+```{r}
+#Boost best model:
+boost_wflow <- 
+  workflow() %>% 
+  add_model(boost_model) %>% 
+  add_recipe(norm_recipe)
+
+glmnet_fit3 <- fit(boost_wflow, vote_train)
+
+glmnet_test_results3 <- 
+  vote_test %>%
+  select(num) %>%
+  bind_cols(predict(glmnet_fit3, new_data = vote_test))
+
+head(glmnet_test_results3)
+
+
+# see the relationship between actual value and predicted value.
+vote_test_res2 <- predict(glmnet_fit3, new_data = vote_test %>% select(-num))
+vote_test_res2
+vote_test_res2 <- bind_cols(vote_test_res2, vote_test %>% select(num))
+vote_test_res2
+
+ggplot(vote_test_res2, aes(x = num, y = .pred)) +
+  geom_abline(lty = 2) + # adds a diagonal line
+  geom_point(alpha = 0.5) +
+  labs(y = "Predicted num ", x = "num") +
+  coord_obs_pred()
+
+rmse(glmnet_test_results3, truth = num, estimate = .pred)
+```
+
+```{r}
+#Boost best model2:
+boost2_wflow <- 
+  workflow() %>% 
+  add_model(boost_model2) %>% 
+  add_recipe(norm_recipe)
+
+glmnet_fit4 <- fit(boost2_wflow, vote_train)
+
+glmnet_test_results4 <- 
+  vote_test %>%
+  select(num) %>%
+  bind_cols(predict(glmnet_fit4, new_data = vote_test))
+
+head(glmnet_test_results4)
+
+
+# see the relationship between actual value and predicted value.
+vote_test_res2 <- predict(glmnet_fit4, new_data = vote_test %>% select(-num))
+vote_test_res2
+vote_test_res2 <- bind_cols(vote_test_res2, vote_test %>% select(num))
+vote_test_res2
+
+ggplot(vote_test_res2, aes(x = num, y = .pred)) +
+  geom_abline(lty = 2) + # adds a diagonal line
+  geom_point(alpha = 0.5) +
+  labs(y = "Predicted num ", x = "num") +
+  coord_obs_pred()
+
+rmse(glmnet_test_results4, truth = num, estimate = .pred)
+```
+
+```{r}
+#Boost best model3:
+boost3_wflow <- 
+  workflow() %>% 
+  add_model(boost_model3) %>% 
+  add_recipe(norm_recipe)
+
+glmnet_fit5 <- fit(boost3_wflow, vote_train)
+
+glmnet_test_results5 <- 
+  vote_test %>%
+  select(num) %>%
+  bind_cols(predict(glmnet_fit5, new_data = vote_test))
+
+head(glmnet_test_results5)
+
+
+# see the relationship between actual value and predicted value.
+vote_test_res2 <- predict(glmnet_fit5, new_data = vote_test %>% select(-num))
+vote_test_res2
+vote_test_res2 <- bind_cols(vote_test_res2, vote_test %>% select(num))
+vote_test_res2
+
+ggplot(vote_test_res2, aes(x = num, y = .pred)) +
+  geom_abline(lty = 2) + # adds a diagonal line
+  geom_point(alpha = 0.5) +
+  labs(y = "Predicted num ", x = "num") +
+  coord_obs_pred()
+
+rmse(glmnet_test_results5, truth = num, estimate = .pred)
+```
+
+```{r}
+# importing test data for kaggle
+kaggle_test_data <- read_csv("heart_test.csv")
+head(kaggle_test_data)
+str(kaggle_test_data)
+```
+
+Cleaning Data
+
+```{r}
+data_with_id <- kaggle_test_data[, "id"]
+kaggle_test_data <- select(kaggle_test_data, !"id")
+head(kaggle_test_data)
+
+kaggle_test_data$cp <- as.character(kaggle_test_data$cp)
+kaggle_test_data$slope <- as.character(kaggle_test_data$slope)
+kaggle_test_data$ca <- as.numeric(kaggle_test_data$ca)
+str(kaggle_test_data)
+kaggle_test_data$thal <- as.character(kaggle_test_data$thal)
+
+
+# install.packages("caret")
+library(caret)
+dmy <- dummyVars(~., data = kaggle_test_data)
+kaggle_test_data <- data.frame(predict(dmy, newdata = kaggle_test_data))
+head(kaggle_test_data)
+str(kaggle_test_data)
+```
+
+```{r}
+# output for kaggle
+kaggle_test_results <- bind_cols(data_with_id, predict(glmnet_fit, new_data = kaggle_test_data))
+kaggle_test_results2 <- bind_cols(data_with_id, predict(glmnet_fit2, new_data = kaggle_test_data))
+kaggle_test_results3 <- bind_cols(data_with_id, predict(glmnet_fit3, new_data = kaggle_test_data))
+kaggle_test_results4 <- bind_cols(data_with_id, predict(glmnet_fit4, new_data = kaggle_test_data))
+kaggle_test_results5 <- bind_cols(data_with_id, predict(glmnet_fit5, new_data = kaggle_test_data))
+
+
+kaggle_test_results[is.na(kaggle_test_results)] <- 0
+kaggle_test_results2[is.na(kaggle_test_results2)] <- 0
+kaggle_test_results3[is.na(kaggle_test_results3)] <- 0
+kaggle_test_results4[is.na(kaggle_test_results4)] <- 0
+kaggle_test_results5[is.na(kaggle_test_results5)] <- 0
+
+a <- cbind(kaggle_test_results$.pred,kaggle_test_results2$.pred,kaggle_test_results3$.pred,kaggle_test_results4$.pred,kaggle_test_results5$.pred)
+mean_pred <-apply(a,1,mean)
+kaggle_test_results_new <- bind_cols(data_with_id,as_tibble(mean_pred))
+
+
+
+names(kaggle_test_results_new) <- c("Id", "Predicted")
+kaggle_test_results_new$Predicted <- ifelse(kaggle_test_results_new$Predicted >= 0.5, 1, 0)
+
+
+write.csv(kaggle_test_results_new,"results_2nd_try2.csv", row.names = FALSE)
+
+kaggle_test_results_new
+```
